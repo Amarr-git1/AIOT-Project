@@ -1,0 +1,68 @@
+{
+  "GCN + SAC": {
+    "Accuracy": 0.754448,
+    "Precision": 0.754448,
+    "Recall": 1.0,
+    "F1": 0.8600403089746746,
+    "ROC_AUC": 0.987337559302656,
+    "Defense_Success_Rate": 24.352,
+    "Attack_Containment_Rate": 90.66666666666667,
+    "Attack_Reduction_Rate": -23.80952380952381,
+    "Average_Reward": 17.448193721008295,
+    "Unnecessary_Isolation_Rate": 0.0,
+    "Action_Distribution": {
+      "ALLOW_TRAFFIC": 0,
+      "MONITOR": 15959,
+      "RAISE_ALERT": 46541,
+      "RATE_LIMIT_TRAFFIC": 0,
+      "BLOCK_SOURCE_IP": 0,
+      "BLOCK_DESTINATION_PORT": 0,
+      "ISOLATE_HOST": 0,
+      "TERMINATE_SESSION": 0
+    }
+  },
+  "GAT + DQN": {
+    "Accuracy": 0.75288,
+    "Precision": 0.75288,
+    "Recall": 1.0,
+    "F1": 0.8590205832686778,
+    "ROC_AUC": 0.6741514752767739,
+    "Defense_Success_Rate": 24.4864,
+    "Attack_Containment_Rate": 89.33333333333333,
+    "Attack_Reduction_Rate": -23.80952380952381,
+    "Average_Reward": -31.142006278991712,
+    "Unnecessary_Isolation_Rate": 0.0,
+    "Action_Distribution": {
+      "ALLOW_TRAFFIC": 0,
+      "MONITOR": 0,
+      "RAISE_ALERT": 0,
+      "RATE_LIMIT_TRAFFIC": 54100,
+      "BLOCK_SOURCE_IP": 0,
+      "BLOCK_DESTINATION_PORT": 8400,
+      "ISOLATE_HOST": 0,
+      "TERMINATE_SESSION": 0
+    }
+  },
+  "GAT + PPO": {
+    "Accuracy": 0.751248,
+    "Precision": 0.751248,
+    "Recall": 1.0,
+    "F1": 0.8579572967392397,
+    "ROC_AUC": 0.4262047109288624,
+    "Defense_Success_Rate": 24.5328,
+    "Attack_Containment_Rate": 88.08333333333333,
+    "Attack_Reduction_Rate": -23.80952380952381,
+    "Average_Reward": -48.03640627899167,
+    "Unnecessary_Isolation_Rate": 0.0,
+    "Action_Distribution": {
+      "ALLOW_TRAFFIC": 0,
+      "MONITOR": 0,
+      "RAISE_ALERT": 0,
+      "RATE_LIMIT_TRAFFIC": 41764,
+      "BLOCK_SOURCE_IP": 0,
+      "BLOCK_DESTINATION_PORT": 20736,
+      "ISOLATE_HOST": 0,
+      "TERMINATE_SESSION": 0
+    }
+  }
+}
