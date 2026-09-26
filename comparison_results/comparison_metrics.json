@@ -1,21 +1,21 @@
 {
   "GCN + SAC": {
-    "Accuracy": 0.754448,
-    "Precision": 0.754448,
+    "Accuracy": 0.77616,
+    "Precision": 0.7715918367346939,
     "Recall": 1.0,
-    "F1": 0.8600403089746746,
-    "ROC_AUC": 0.987337559302656,
-    "Defense_Success_Rate": 24.352,
-    "Attack_Containment_Rate": 90.66666666666667,
+    "F1": 0.8710717906183761,
+    "ROC_AUC": 0.9490852662936812,
+    "Defense_Success_Rate": 24.852244897959185,
+    "Attack_Containment_Rate": 91.25,
     "Attack_Reduction_Rate": -23.80952380952381,
-    "Average_Reward": 17.448193721008295,
+    "Average_Reward": 17.53799372100829,
     "Unnecessary_Isolation_Rate": 0.0,
     "Action_Distribution": {
-      "ALLOW_TRAFFIC": 0,
-      "MONITOR": 15959,
-      "RAISE_ALERT": 46541,
-      "RATE_LIMIT_TRAFFIC": 0,
-      "BLOCK_SOURCE_IP": 0,
+      "ALLOW_TRAFFIC": 1250,
+      "MONITOR": 33708,
+      "RAISE_ALERT": 21248,
+      "RATE_LIMIT_TRAFFIC": 3794,
+      "BLOCK_SOURCE_IP": 2500,
       "BLOCK_DESTINATION_PORT": 0,
       "ISOLATE_HOST": 0,
       "TERMINATE_SESSION": 0
@@ -63,6 +63,28 @@
       "BLOCK_DESTINATION_PORT": 20736,
       "ISOLATE_HOST": 0,
       "TERMINATE_SESSION": 0
+    }
+  },
+  "Attack Graph + Q-Learning": {
+    "Accuracy": 0.674256,
+    "Precision": 0.7352206190832314,
+    "Recall": 0.8733911159263272,
+    "F1": 0.7983718419775584,
+    "ROC_AUC": 0.47064602926900384,
+    "Defense_Success_Rate": 42.403735658391554,
+    "Attack_Containment_Rate": 99.83388704318936,
+    "Attack_Reduction_Rate": -17.428571428571427,
+    "Average_Reward": -79.48163470458985,
+    "Unnecessary_Isolation_Rate": 46.12377122430742,
+    "Action_Distribution": {
+      "ALLOW_TRAFFIC": 7677,
+      "MONITOR": 9248,
+      "RAISE_ALERT": 5937,
+      "RATE_LIMIT_TRAFFIC": 8385,
+      "BLOCK_SOURCE_IP": 9906,
+      "BLOCK_DESTINATION_PORT": 3443,
+      "ISOLATE_HOST": 5148,
+      "TERMINATE_SESSION": 12756
     }
   }
 }

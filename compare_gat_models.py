@@ -20,6 +20,11 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from attacker.attacker import attack_step
 from data.data_processor import NetworkDataProcessor
 from decision.action_decider import SecurityAction, map_action_value_to_security_action, requires_isolation
+from decision.attack_graph_q_learning import (
+    AttackGraphQLearningAgent,
+    build_attack_graph,
+    discretize_attack_graph_state,
+)
 from decision.gat_agents import GATDQNAgent, GATPPOAgent
 from graph.build_graph import build_graph
 from main import NUM_FEATURES, NUM_NODES, compute_state, create_network_fat_tree
@@ -88,7 +93,8 @@ def new_stats(episodes):
     }
 
 
-def evaluate_policy(name, policy, gcn_model, device, episodes, steps, train=False, diagnostic_episodes=0):
+def evaluate_policy(name, policy, gcn_model, device, episodes, steps, train=False,
+                    diagnostic_episodes=0, debug_steps=0):
     stats = new_stats(episodes)
     edge_index = None
     for episode in range(episodes):
@@ -118,6 +124,13 @@ def evaluate_policy(name, policy, gcn_model, device, episodes, steps, train=Fals
                 actions, q_values = policy.select_actions(np.asarray(features, dtype=np.float32), edge_index, deterministic=not train)
                 next_features, labels = apply_discrete_actions(features, actions)
                 scores = 1.0 - torch.softmax(torch.as_tensor(q_values), dim=1).numpy()[:, 0]
+            elif name == 'Attack Graph + Q-Learning':
+                attack_graph = build_attack_graph(adj_list, features)
+                state_keys = discretize_attack_graph_state(attack_graph)
+                actions, q_values = policy.select_actions(state_keys, explore=train)
+                next_features, labels = apply_discrete_actions(features, actions)
+                q_tensor = torch.as_tensor(q_values, dtype=torch.float32)
+                scores = 1.0 - torch.softmax(q_tensor, dim=1).numpy()[:, 0]
             else:
                 actions, _, _, probabilities = policy.select_actions(np.asarray(features, dtype=np.float32), edge_index, deterministic=not train)
                 next_features, labels = apply_discrete_actions(features, actions)
@@ -167,6 +180,25 @@ def evaluate_policy(name, policy, gcn_model, device, episodes, steps, train=Fals
             stats['failed_defenses'] += action_failures
             reward = compute_reward(previous_features, features, previous_risks, next_risks, labels)
             episode_reward += reward
+            done = float(sum(int(feature[0]) for feature in features) == NUM_NODES)
+
+            if name == 'Attack Graph + Q-Learning' and train:
+                next_graph = build_attack_graph(adj_list, features)
+                next_state_keys = discretize_attack_graph_state(next_graph)
+                policy.update(state_keys, actions, reward, next_state_keys, bool(done))
+
+            if name == 'Attack Graph + Q-Learning' and episode == 0 and step < debug_steps:
+                target_action = SecurityAction(int(actions[attack_target])).name
+                print(
+                    f'  Step: {step + 1} | State: {state_keys[attack_target]} | '
+                    f'Selected Action: {target_action} | '
+                    f'Previous Compromised: {previous_count} | Current Compromised: {next_count} | '
+                    f'Previous Risk: {float(np.mean(previous_risks)):.4f} | '
+                    f'Current Risk: {float(np.mean(next_risks)):.4f} | '
+                    f"Previous Isolation: {sum(int(item[2] >= 0.5) for item in previous_features)} | "
+                    f"Current Isolation: {sum(int(item[2] >= 0.5) for item in features)} | "
+                    f'Reward: {reward:.4f}'
+                )
 
             targets = np.asarray([
                 int(compromised or float(previous_features[index][1]) >= 0.6)
@@ -177,7 +209,6 @@ def evaluate_policy(name, policy, gcn_model, device, episodes, steps, train=Fals
             stats['predictions'].extend(predictions.tolist())
             stats['scores'].extend(scores.tolist())
 
-            done = float(sum(int(feature[0]) for feature in features) == NUM_NODES)
             if train and name == 'GAT + DQN':
                 policy.store(np.asarray(features, dtype=np.float32), edge_index, actions, reward, np.asarray(features, dtype=np.float32), done)
                 policy.update()
@@ -254,13 +285,45 @@ def train_dqn_correctly(policy, gcn_model, device, episodes, steps):
         print(f'GAT + DQN: training episode {episode + 1}/{episodes}, epsilon={policy.epsilon:.3f}')
 
 
+def train_attack_graph_q_learning(policy, gcn_model, device, episodes, steps):
+    """Train tabular Q-learning with the shared topology, attack, and reward."""
+    for episode in range(episodes):
+        adj_list, features, _ = create_network_fat_tree()
+        episode_reward = 0.0
+        completed_steps = 0
+        for _ in range(steps):
+            previous_features = [list(feature) for feature in features]
+            _, previous_risks = compute_state(adj_list, features, gcn_model, device)
+            state_keys = discretize_attack_graph_state(build_attack_graph(adj_list, features))
+            actions, _ = policy.select_actions(state_keys, explore=True)
+            next_features, labels = apply_discrete_actions(features, actions)
+            features = attack_step(adj_list, next_features, defense_actions=labels)
+            _, next_risks = compute_state(adj_list, features, gcn_model, device)
+            reward = compute_reward(previous_features, features, previous_risks, next_risks, labels)
+            episode_reward += reward
+            completed_steps += 1
+            done = sum(int(feature[0]) for feature in features) == NUM_NODES
+            next_state_keys = discretize_attack_graph_state(build_attack_graph(adj_list, features))
+            policy.update(state_keys, actions, reward, next_state_keys, done)
+            if done:
+                break
+        policy.finish_episode()
+        print(
+            f'Attack Graph + Q-Learning: training episode {episode + 1}/{episodes}, '
+            f'total reward={episode_reward:.3f}, '
+            f'average reward={episode_reward / max(1, completed_steps):.3f}, '
+            f'epsilon={policy.epsilon:.3f}, learned states={len(policy.q_table)}'
+        )
+
+
 def create_comparison_plot(results):
     metric_names = ['Accuracy', 'Precision', 'Recall', 'F1', 'Defense_Success_Rate', 'Attack_Containment_Rate', 'Attack_Reduction_Rate', 'Average_Reward', 'Unnecessary_Isolation_Rate']
     models = list(results)
     figure, axes = plt.subplots(3, 3, figsize=(16, 12))
     for axis, metric in zip(axes.flat, metric_names):
         values = [results[model][metric] if results[model][metric] is not None else 0.0 for model in models]
-        axis.bar(models, values, color=['#1769aa', '#d97706', '#15803d'])
+        colors = ['#1769aa', '#d97706', '#15803d', '#a21caf']
+        axis.bar(models, values, color=colors[:len(models)])
         axis.set_title(metric.replace('_', ' '))
         axis.tick_params(axis='x', rotation=25)
         axis.grid(axis='y', alpha=0.3)
@@ -283,20 +346,84 @@ def main(args):
     if os.path.exists(args.gcn_checkpoint):
         gcn_model.load_state_dict(torch.load(args.gcn_checkpoint, map_location=device))
     gcn_model.eval()
-    sac = SACAgent(state_dim=NUM_NODES * (NUM_FEATURES + 1), action_dim=NUM_NODES, device=device)
-    if os.path.exists(args.sac_checkpoint):
-        sac.load(args.sac_checkpoint)
+    csv_path = os.path.join(RESULT_DIR, 'comparison_metrics.csv')
+    json_path = os.path.join(RESULT_DIR, 'comparison_metrics.json')
+    results = {}
+    if os.path.exists(json_path):
+        with open(json_path, encoding='utf-8') as handle:
+            results.update(json.load(handle))
+    if os.path.exists(csv_path):
+        prior_rows = pd.read_csv(csv_path)
+        metric_columns = {
+            'Accuracy': 'Accuracy', 'Precision': 'Precision', 'Recall': 'Recall',
+            'F1': 'F1', 'ROC_AUC': 'ROC_AUC',
+            'Defense_Success_Rate': 'Defense_Success_Rate',
+            'Attack_Containment_Rate': 'Attack_Containment_Rate',
+            'Attack_Reduction_Rate': 'Attack_Reduction_Rate',
+            'Average_Reward': 'Average_Reward',
+            'Unnecessary_Isolation_Rate': 'Unnecessary_Isolation_Rate',
+        }
+        for _, prior_row in prior_rows.iterrows():
+            model = prior_row['Model']
+            model_metrics = results.setdefault(model, {})
+            for key, column in metric_columns.items():
+                if column in prior_row:
+                    value = prior_row[column]
+                    model_metrics[key] = None if pd.isna(value) else float(value)
 
-    dqn = GATDQNAgent(device=device)
-    ppo = GATPPOAgent(device=device)
-    train_dqn_correctly(dqn, gcn_model, device, args.train_episodes, args.train_steps)
-    train_ppo_correctly(ppo, gcn_model, device, args.train_episodes, args.train_steps)
+    missing_models = {'GCN + SAC', 'GAT + DQN', 'GAT + PPO'} - results.keys()
+    if missing_models:
+        sac = SACAgent(state_dim=NUM_NODES * (NUM_FEATURES + 1), action_dim=NUM_NODES, device=device)
+        if os.path.exists(args.sac_checkpoint):
+            sac.load(args.sac_checkpoint)
+        dqn = GATDQNAgent(device=device)
+        ppo = GATPPOAgent(device=device)
+        if 'GAT + DQN' in missing_models:
+            train_dqn_correctly(dqn, gcn_model, device, args.train_episodes, args.train_steps)
+            results['GAT + DQN'] = evaluate_policy('GAT + DQN', dqn, gcn_model, device, args.eval_episodes, args.eval_steps, diagnostic_episodes=args.diagnostic_episodes)
+        if 'GAT + PPO' in missing_models:
+            train_ppo_correctly(ppo, gcn_model, device, args.train_episodes, args.train_steps)
+            results['GAT + PPO'] = evaluate_policy('GAT + PPO', ppo, gcn_model, device, args.eval_episodes, args.eval_steps, diagnostic_episodes=args.diagnostic_episodes)
+        if 'GCN + SAC' in missing_models:
+            results['GCN + SAC'] = evaluate_policy('GCN + SAC', sac, gcn_model, device, args.eval_episodes, args.eval_steps, diagnostic_episodes=args.diagnostic_episodes)
 
-    results = {
-        'GCN + SAC': evaluate_policy('GCN + SAC', sac, gcn_model, device, args.eval_episodes, args.eval_steps, diagnostic_episodes=args.diagnostic_episodes),
-        'GAT + DQN': evaluate_policy('GAT + DQN', dqn, gcn_model, device, args.eval_episodes, args.eval_steps, diagnostic_episodes=args.diagnostic_episodes),
-        'GAT + PPO': evaluate_policy('GAT + PPO', ppo, gcn_model, device, args.eval_episodes, args.eval_steps, diagnostic_episodes=args.diagnostic_episodes),
+    set_seed(args.seed)
+    q_learning = AttackGraphQLearningAgent(
+        alpha=args.q_alpha,
+        gamma=args.q_gamma,
+        epsilon=args.q_epsilon,
+        epsilon_min=args.q_epsilon_min,
+        epsilon_decay=args.q_epsilon_decay,
+    )
+    train_attack_graph_q_learning(q_learning, gcn_model, device, args.train_episodes, args.train_steps)
+    set_seed(args.seed)
+    q_metrics = evaluate_policy(
+        'Attack Graph + Q-Learning', q_learning, gcn_model, device,
+        args.eval_episodes, args.eval_steps,
+        diagnostic_episodes=args.diagnostic_episodes,
+        debug_steps=args.debug_steps,
+    )
+    results['Attack Graph + Q-Learning'] = q_metrics
+
+    print('\n' + '=' * 60)
+    print('ATTACK GRAPH + Q-LEARNING EVALUATION')
+    print('=' * 60)
+    print(f'Training Episodes: {args.train_episodes}')
+    print(f'Evaluation Episodes: {args.eval_episodes}')
+    report_names = {
+        'Accuracy': 'Accuracy', 'Precision': 'Precision', 'Recall': 'Recall', 'F1': 'F1',
+        'ROC_AUC': 'ROC-AUC', 'Defense_Success_Rate': 'Defense Success Rate',
+        'Attack_Containment_Rate': 'Attack Containment Rate',
+        'Attack_Reduction_Rate': 'Attack Reduction Rate',
+        'Average_Reward': 'Average Episode Reward',
+        'Unnecessary_Isolation_Rate': 'Unnecessary Isolation Rate',
     }
+    for key, label in report_names.items():
+        print(f'{label}: {q_metrics[key]}')
+    print('Action Distribution:')
+    for action_name in ACTION_NAMES:
+        print(f'{action_name}: {q_metrics["Action_Distribution"].get(action_name, 0)}')
+
     rows = []
     for model, metrics in results.items():
         row = {'Model': model, **{key: value for key, value in metrics.items() if key != 'Action_Distribution'}}
@@ -304,8 +431,18 @@ def main(args):
         print('\n' + model)
         for key, value in metrics.items():
             print(f'  {key}: {value}')
-    pd.DataFrame(rows).to_csv(os.path.join(RESULT_DIR, 'comparison_metrics.csv'), index=False)
-    with open(os.path.join(RESULT_DIR, 'comparison_metrics.json'), 'w', encoding='utf-8') as handle:
+    comparison = pd.DataFrame(rows)
+    print('\nComplete model comparison:')
+    print(comparison.rename(columns={
+        'ROC_AUC': 'ROC-AUC',
+        'Defense_Success_Rate': 'Defense Success Rate',
+        'Attack_Containment_Rate': 'Attack Containment Rate',
+        'Attack_Reduction_Rate': 'Attack Reduction Rate',
+        'Average_Reward': 'Average Episode Reward',
+        'Unnecessary_Isolation_Rate': 'Unnecessary Isolation Rate',
+    }).to_string(index=False))
+    comparison.to_csv(csv_path, index=False)
+    with open(json_path, 'w', encoding='utf-8') as handle:
         json.dump(results, handle, indent=2)
     create_comparison_plot(results)
     print(f'\nSaved CSV, JSON, and comparison plot under {RESULT_DIR}/')
@@ -322,4 +459,10 @@ if __name__ == '__main__':
     parser.add_argument('--eval-steps', type=int, default=25)
     parser.add_argument('--seed', type=int, default=SEED)
     parser.add_argument('--diagnostic-episodes', type=int, default=0)
+    parser.add_argument('--debug-steps', type=int, default=5)
+    parser.add_argument('--q-alpha', type=float, default=0.2)
+    parser.add_argument('--q-gamma', type=float, default=0.95)
+    parser.add_argument('--q-epsilon', type=float, default=1.0)
+    parser.add_argument('--q-epsilon-min', type=float, default=0.05)
+    parser.add_argument('--q-epsilon-decay', type=float, default=0.97)
     main(parser.parse_args())
