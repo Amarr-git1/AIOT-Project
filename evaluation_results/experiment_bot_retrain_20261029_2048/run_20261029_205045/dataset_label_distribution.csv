@@ -1,0 +1,12 @@
+label,records
+DDoS,128027
+BENIGN,1672837
+PortScan,158930
+Bot,1966
+Infiltration,36
+DoS slowloris,5796
+DoS Slowhttptest,5499
+DoS Hulk,231073
+DoS GoldenEye,10293
+Heartbleed,11
+<MISSING>,1

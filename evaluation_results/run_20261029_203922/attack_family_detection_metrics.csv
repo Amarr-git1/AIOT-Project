@@ -1,0 +1,4 @@
+attack_family,evaluation_scope,accuracy,precision,recall,f1,roc_auc,false_positive_rate,confusion_matrix,benign_records,attack_records,test_records,threshold
+DDoS,DDoS versus BENIGN; other attack families excluded,0.8987968387418482,0.37525167202795584,0.634687646782527,0.4716473479835367,0.8010225553459516,0.08096622008679666,"{'TN': 306427, 'FP': 26996, 'FN': 9333, 'TP': 16215}",333423,25548,358971,0.515
+PortScan,PortScan versus BENIGN; other attack families excluded,0.8757094180033307,0.3297914597815293,0.4195168166745618,0.36928209048578775,0.8608698160715847,0.08096622008679666,"{'TN': 306427, 'FP': 26996, 'FN': 18381, 'TP': 13284}",333423,31665,365088,0.515
+Bot,Bot versus BENIGN; other attack families excluded,0.9179463060709728,0.0,0.0,0.0,0.4945690153652465,0.08096622008679666,"{'TN': 306427, 'FP': 26996, 'FN': 395, 'TP': 0}",333423,395,333818,0.515

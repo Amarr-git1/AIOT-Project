@@ -243,9 +243,13 @@ def evaluate_policy(name, policy, gcn_model, device, episodes, steps, train=Fals
     return metrics_from_rollouts(stats)
 
 
-def train_ppo_correctly(policy, gcn_model, device, episodes, steps):
+def train_ppo_correctly(policy, gcn_model, device, episodes, steps, attack_scenarios=None):
     """Train PPO while retaining its sampled log-probabilities and values."""
     for episode in range(episodes):
+        attack_scenario = (
+            attack_scenarios[episode % len(attack_scenarios)]
+            if attack_scenarios else 'generic'
+        )
         adj_list, features, _ = create_network_fat_tree()
         _, edge_index = build_graph(adj_list, features)
         for _ in range(steps):
@@ -253,7 +257,10 @@ def train_ppo_correctly(policy, gcn_model, device, episodes, steps):
             _, previous_risks = compute_state(adj_list, features, gcn_model, device)
             actions, log_probs, values, _ = policy.select_actions(np.asarray(features, dtype=np.float32), edge_index)
             next_features, labels = apply_discrete_actions(features, actions)
-            features = attack_step(adj_list, next_features, defense_actions=labels)
+            features = attack_step(
+                adj_list, next_features, defense_actions=labels,
+                scenario=attack_scenario,
+            )
             _, next_risks = compute_state(adj_list, features, gcn_model, device)
             reward = compute_reward(previous_features, features, previous_risks, next_risks, labels)
             done = float(sum(int(feature[0]) for feature in features) == NUM_NODES)
@@ -285,9 +292,13 @@ def train_dqn_correctly(policy, gcn_model, device, episodes, steps):
         print(f'GAT + DQN: training episode {episode + 1}/{episodes}, epsilon={policy.epsilon:.3f}')
 
 
-def train_attack_graph_q_learning(policy, gcn_model, device, episodes, steps):
+def train_attack_graph_q_learning(policy, gcn_model, device, episodes, steps, attack_scenarios=None):
     """Train tabular Q-learning with the shared topology, attack, and reward."""
     for episode in range(episodes):
+        attack_scenario = (
+            attack_scenarios[episode % len(attack_scenarios)]
+            if attack_scenarios else 'generic'
+        )
         adj_list, features, _ = create_network_fat_tree()
         episode_reward = 0.0
         completed_steps = 0
@@ -297,7 +308,10 @@ def train_attack_graph_q_learning(policy, gcn_model, device, episodes, steps):
             state_keys = discretize_attack_graph_state(build_attack_graph(adj_list, features))
             actions, _ = policy.select_actions(state_keys, explore=True)
             next_features, labels = apply_discrete_actions(features, actions)
-            features = attack_step(adj_list, next_features, defense_actions=labels)
+            features = attack_step(
+                adj_list, next_features, defense_actions=labels,
+                scenario=attack_scenario,
+            )
             _, next_risks = compute_state(adj_list, features, gcn_model, device)
             reward = compute_reward(previous_features, features, previous_risks, next_risks, labels)
             episode_reward += reward

@@ -1,0 +1,13 @@
+model,attack_scenario,policy_alert_accuracy,evaluation_training_seeds,evaluation_episodes_per_seed,observations,metric_definition
+Attack Graph + Q-Learning,Bot,0.8029866666666666,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+Attack Graph + Q-Learning,DDoS,0.6706666666666666,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+Attack Graph + Q-Learning,PortScan,0.7203733333333333,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+DQN,Bot,0.919923076923077,3,10,13000,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+DQN,DDoS,0.7554133333333334,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+DQN,PortScan,0.8612587412587412,3,10,35750,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+PPO,Bot,0.7371633752244166,3,10,27850,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+PPO,DDoS,0.5701866666666666,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+PPO,PortScan,0.6591,3,10,30000,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+SAC,Bot,0.8670133333333333,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+SAC,DDoS,0.73936,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label
+SAC,PortScan,0.7323466666666667,3,10,37500,non-ALLOW predicts threat; compromised flag or risk >= 0.6 is threat label

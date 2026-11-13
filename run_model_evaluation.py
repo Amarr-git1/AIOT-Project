@@ -31,7 +31,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.nn import functional as F
 
-from attacker.attacker import attack_step
+from attacker.attacker import ATTACK_SCENARIOS, attack_step, get_attack_targets
 from compare_gat_models import (
     train_attack_graph_q_learning,
     train_ppo_correctly,
@@ -51,6 +51,8 @@ from reward_functions import compute_reward
 
 
 LABEL_COLUMN = 'Label'
+ATTACK_FAMILY_LABELS = ('OTHER', 'BENIGN', 'DDoS', 'PortScan', 'Bot')
+ATTACK_FAMILY_CODES = {label: index for index, label in enumerate(ATTACK_FAMILY_LABELS)}
 DETECTION_MODELS = (
     'GCN detector (GCN + SAC approach)',
     'GAT + DQN',
@@ -94,6 +96,7 @@ def read_chunked_dataset_profile(csv_path):
     label_counts = Counter()
     missing_by_column = Counter()
     binary_parts = []
+    attack_family_code_parts = []
     group_parts = []
     exact_hash_parts = []
     row_offset = 0
@@ -106,6 +109,9 @@ def read_chunked_dataset_profile(csv_path):
         labels = chunk[LABEL_COLUMN].astype('string').str.strip()
         clean_labels = labels.fillna('<MISSING>')
         label_counts.update(clean_labels.value_counts(dropna=False).to_dict())
+        attack_family_code_parts.append(
+            labels.map(ATTACK_FAMILY_CODES).fillna(0).to_numpy(dtype=np.int8)
+        )
         missing_by_column.update(chunk.isna().sum().to_dict())
 
         numeric = chunk[feature_columns].apply(pd.to_numeric, errors='coerce')
@@ -124,6 +130,7 @@ def read_chunked_dataset_profile(csv_path):
         print(f'Dataset scan: {row_offset:,} rows', flush=True)
 
     binary_all = np.concatenate(binary_parts)
+    attack_family_codes_by_record = np.concatenate(attack_family_code_parts)
     groups_all = np.concatenate(group_parts)
     exact_hashes_all = np.concatenate(exact_hash_parts)
     labeled_mask = binary_all >= 0
@@ -167,7 +174,11 @@ def read_chunked_dataset_profile(csv_path):
         'timestamp_columns': [],
         'host_endpoint_columns': [],
     }
-    return summary, feature_columns, record_ids, labels_binary, feature_groups, y_by_record, group_by_record, conflicting_feature_groups
+    return (
+        summary, feature_columns, record_ids, labels_binary, feature_groups,
+        y_by_record, attack_family_codes_by_record, group_by_record,
+        conflicting_feature_groups,
+    )
 
 
 def make_grouped_split(record_ids, labels, groups, seed):
@@ -262,7 +273,10 @@ class FlowPreprocessor:
         return self.scaler.transform(self.imputer.transform(features))
 
 
-def predict_gcn(model, csv_path, record_ids, feature_columns, y_by_record, preprocessor, batch_size, device):
+def predict_gcn(
+    model, csv_path, record_ids, feature_columns, y_by_record,
+    attack_family_codes_by_record, preprocessor, batch_size, device,
+):
     predictions = []
     model.eval()
     empty_edges = torch.empty((2, 0), dtype=torch.long, device=device)
@@ -275,6 +289,10 @@ def predict_gcn(model, csv_path, record_ids, feature_columns, y_by_record, prepr
             predictions.append(pd.DataFrame({
                 'record_id': batch_ids,
                 'binary_true': labels.astype(np.int8),
+                'true_attack_family': pd.Categorical.from_codes(
+                    attack_family_codes_by_record[batch_ids],
+                    categories=ATTACK_FAMILY_LABELS,
+                ),
                 'gcn_score': scores,
             }))
     if not predictions:
@@ -319,6 +337,57 @@ def calculate_detection_metrics(predictions, threshold):
     }
 
 
+def calculate_attack_family_metrics(predictions, threshold):
+    results = {}
+    labels = predictions['true_attack_family'].astype(str)
+    scores = predictions['gcn_score'].to_numpy(dtype=np.float64)
+    for attack_family in ('DDoS', 'PortScan', 'Bot'):
+        selected = labels.isin(('BENIGN', attack_family)).to_numpy()
+        family_labels = (labels[selected].to_numpy() == attack_family).astype(np.int8)
+        family_scores = scores[selected]
+        family_predictions = (family_scores >= threshold).astype(np.int8)
+        tn, fp, fn, tp = confusion_matrix(
+            family_labels, family_predictions, labels=[0, 1],
+        ).ravel()
+        results[attack_family] = {
+            'evaluation_scope': f'{attack_family} versus BENIGN; other attack families excluded',
+            'accuracy': float(accuracy_score(family_labels, family_predictions)),
+            'precision': float(precision_score(family_labels, family_predictions, zero_division=0)),
+            'recall': float(recall_score(family_labels, family_predictions, zero_division=0)),
+            'f1': float(f1_score(family_labels, family_predictions, zero_division=0)),
+            'roc_auc': (
+                float(roc_auc_score(family_labels, family_scores))
+                if len(np.unique(family_labels)) == 2 else None
+            ),
+            'false_positive_rate': float(fp / (fp + tn)) if fp + tn else None,
+            'confusion_matrix': {'TN': int(tn), 'FP': int(fp), 'FN': int(fn), 'TP': int(tp)},
+            'benign_records': int(tn + fp),
+            'attack_records': int(fn + tp),
+            'test_records': int(len(family_labels)),
+            'threshold': float(threshold),
+        }
+    return results
+
+
+def attack_family_distribution_rows(splits, attack_family_codes_by_record):
+    rows = []
+    for split_name, record_ids in splits.items():
+        codes, counts = np.unique(
+            attack_family_codes_by_record[record_ids],
+            return_counts=True,
+        )
+        split_counts = dict(zip(codes.tolist(), counts.tolist()))
+        for code, attack_family in enumerate(ATTACK_FAMILY_LABELS):
+            if attack_family == 'OTHER':
+                attack_family = 'OTHER_ATTACK'
+            rows.append({
+                'split': split_name,
+                'attack_family': attack_family,
+                'records': int(split_counts.get(code, 0)),
+            })
+    return rows
+
+
 def save_detection_plots(metrics, output_dir):
     matrix = metrics['confusion_matrix']
     matrix_values = np.array([[matrix['TN'], matrix['FP']], [matrix['FN'], matrix['TP']]])
@@ -351,8 +420,12 @@ def save_detection_plots(metrics, output_dir):
     plt.close(figure)
 
 
-def train_sac_in_simulator(agent, gcn_model, device, episodes, steps):
+def train_sac_in_simulator(agent, gcn_model, device, episodes, steps, attack_scenarios=None):
     for episode in range(episodes):
+        attack_scenario = (
+            attack_scenarios[episode % len(attack_scenarios)]
+            if attack_scenarios else 'generic'
+        )
         adj_list, features, _ = create_network_fat_tree()
         state, risks = compute_state(adj_list, features, gcn_model, device)
         for _ in range(steps):
@@ -362,7 +435,10 @@ def train_sac_in_simulator(agent, gcn_model, device, episodes, steps):
             next_features = [list(feature) for feature in features]
             for index, action_value in enumerate(action_values):
                 next_features[index][2] = float(requires_isolation(map_action_value_to_security_action(action_value)))
-            features = attack_step(adj_list, next_features, defense_actions=labels)
+            features = attack_step(
+                adj_list, next_features, defense_actions=labels,
+                scenario=attack_scenario,
+            )
             next_state, next_risks = compute_state(adj_list, features, gcn_model, device)
             reward = compute_reward(previous, features, risks, next_risks, labels)
             done = float(sum(int(feature[0]) for feature in features) == NUM_NODES)
@@ -375,8 +451,12 @@ def train_sac_in_simulator(agent, gcn_model, device, episodes, steps):
         print(f'SAC simulator training episode {episode + 1}/{episodes}', flush=True)
 
 
-def train_dqn_in_simulator(agent, gcn_model, device, episodes, steps):
+def train_dqn_in_simulator(agent, gcn_model, device, episodes, steps, attack_scenarios=None):
     for episode in range(episodes):
+        attack_scenario = (
+            attack_scenarios[episode % len(attack_scenarios)]
+            if attack_scenarios else 'generic'
+        )
         adj_list, features, _ = create_network_fat_tree()
         _, edge_index = build_graph(adj_list, features)
         for _ in range(steps):
@@ -386,7 +466,10 @@ def train_dqn_in_simulator(agent, gcn_model, device, episodes, steps):
             next_features = [list(feature) for feature in previous]
             for index, action in enumerate(actions):
                 next_features[index][2] = float(requires_isolation(SecurityAction(int(action))))
-            features = attack_step(adj_list, next_features, defense_actions=labels)
+            features = attack_step(
+                adj_list, next_features, defense_actions=labels,
+                scenario=attack_scenario,
+            )
             _, previous_risks = compute_state(adj_list, previous, gcn_model, device)
             _, next_risks = compute_state(adj_list, features, gcn_model, device)
             reward = compute_reward(previous, features, previous_risks, next_risks, labels)
@@ -415,7 +498,29 @@ def choose_policy_actions(name, policy, adj_list, features, edge_index, gcn_mode
     return np.asarray(actions, dtype=np.int64), elapsed_ms
 
 
-def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episode_number, save_trace):
+def policy_alert_confusion_counts(features, action_labels):
+    if len(features) != len(action_labels):
+        raise ValueError('Each node feature row must have exactly one policy action')
+
+    counts = {'true_positive': 0, 'false_positive': 0, 'true_negative': 0, 'false_negative': 0}
+    for feature, action in zip(features, action_labels):
+        is_threat = int(bool(int(feature[0]) or float(feature[1]) >= 0.6))
+        policy_alerted = int(action != 'ALLOW_TRAFFIC')
+        if is_threat and policy_alerted:
+            counts['true_positive'] += 1
+        elif is_threat:
+            counts['false_negative'] += 1
+        elif policy_alerted:
+            counts['false_positive'] += 1
+        else:
+            counts['true_negative'] += 1
+    return counts
+
+
+def run_defense_episode(
+    name, policy, gcn_model, device, seed, max_steps, episode_number,
+    attack_scenario, save_trace,
+):
     set_seed(seed)
     adj_list, features, _ = create_network_fat_tree()
     _, edge_index = build_graph(adj_list, features)
@@ -429,6 +534,12 @@ def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episod
     successful_defenses = 0
     isolation_actions = 0
     unnecessary_isolations = 0
+    policy_alert_counts = {
+        'true_positive': 0,
+        'false_positive': 0,
+        'true_negative': 0,
+        'false_negative': 0,
+    }
     inference_times = []
     risk_before_values = []
     risk_after_values = []
@@ -440,7 +551,8 @@ def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episod
         previous = [list(feature) for feature in features]
         _, previous_risks = compute_state(adj_list, features, gcn_model, device)
         target_node = max(range(NUM_NODES), key=lambda index: previous[index][1])
-        attack_opportunity = previous[target_node][2] < 0.5
+        attack_targets = get_attack_targets(adj_list, previous, attack_scenario)
+        attack_opportunity = bool(attack_targets)
         if attack_opportunity:
             attack_events += 1
             containment_opportunities += 1
@@ -451,6 +563,9 @@ def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episod
         )
         inference_times.append(inference_ms)
         labels = [SecurityAction(int(action)).name for action in actions]
+        step_alert_counts = policy_alert_confusion_counts(previous, labels)
+        for key, value in step_alert_counts.items():
+            policy_alert_counts[key] += value
         defensive_actions += sum(label != 'ALLOW_TRAFFIC' for label in labels)
         isolation_actions += sum(requires_isolation(SecurityAction(int(action))) for action in actions)
         unnecessary_isolations += sum(
@@ -463,7 +578,10 @@ def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episod
         next_features = [list(feature) for feature in features]
         for index, action in enumerate(actions):
             next_features[index][2] = float(requires_isolation(SecurityAction(int(action))))
-        features = attack_step(adj_list, next_features, defense_actions=labels)
+        features = attack_step(
+            adj_list, next_features, defense_actions=labels,
+            scenario=attack_scenario,
+        )
         _, next_risks = compute_state(adj_list, features, gcn_model, device)
         risk_after_values.append(float(np.mean(next_risks)))
         reward = compute_reward(previous, features, previous_risks, next_risks, labels)
@@ -496,13 +614,19 @@ def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episod
                 'model': name,
                 'seed': seed,
                 'episode': episode_number,
+                'attack_scenario': attack_scenario,
                 'step': step,
                 'input_source': 'fixed simulator node features; not combine.csv traffic',
                 'target_node': target_node,
+                'attack_targets': json.dumps(attack_targets),
                 'target_input_features': json.dumps(previous[target_node]),
                 'target_gcn_risk': float(previous_risks[target_node][0]),
-                'detection_output': 'N/A: policy produces defense actions only',
+                'detection_output': 'Policy-alert proxy: non-ALLOW action means threat; compromised or risk >= 0.6 is threat label',
                 'selected_actions_by_node': json.dumps(labels),
+                'policy_alert_accuracy': float(
+                    (step_alert_counts['true_positive'] + step_alert_counts['true_negative'])
+                    / max(1, len(labels))
+                ),
                 'attack_opportunity': bool(attack_opportunity),
                 'newly_compromised_node_ids': json.dumps(new_ids),
                 'risk_before': risk_before_values[-1],
@@ -515,6 +639,7 @@ def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episod
     final_compromised = sum(int(feature[0]) for feature in features)
     return {
         'model': name,
+        'attack_scenario': attack_scenario,
         'seed': int(seed),
         'episode': int(episode_number),
         'steps': int(steps_completed),
@@ -531,6 +656,14 @@ def run_defense_episode(name, policy, gcn_model, device, seed, max_steps, episod
         'isolation_actions': int(isolation_actions),
         'unnecessary_isolation_actions': int(unnecessary_isolations),
         'unnecessary_isolation_rate': float(unnecessary_isolations / max(1, isolation_actions)),
+        'policy_alert_true_positive': int(policy_alert_counts['true_positive']),
+        'policy_alert_false_positive': int(policy_alert_counts['false_positive']),
+        'policy_alert_true_negative': int(policy_alert_counts['true_negative']),
+        'policy_alert_false_negative': int(policy_alert_counts['false_negative']),
+        'policy_alert_accuracy': float(
+            (policy_alert_counts['true_positive'] + policy_alert_counts['true_negative'])
+            / max(1, sum(policy_alert_counts.values()))
+        ),
         'mean_risk_before': float(np.mean(risk_before_values)) if risk_before_values else 0.0,
         'mean_risk_after': float(np.mean(risk_after_values)) if risk_after_values else 0.0,
         'cumulative_reward': float(episode_reward),
@@ -558,15 +691,27 @@ def evaluate_defense_models(output_dir, seeds, train_episodes, train_steps, eval
         q_learning = AttackGraphQLearningAgent()
 
         set_seed(seed)
-        train_sac_in_simulator(sac, gcn_model, device, train_episodes, train_steps)
+        train_sac_in_simulator(
+            sac, gcn_model, device, train_episodes, train_steps,
+            attack_scenarios=ATTACK_SCENARIOS[1:],
+        )
         set_seed(seed)
         adj_list, sample_features, _ = create_network_fat_tree()
         _, edge_index = build_graph(adj_list, sample_features)
-        train_dqn_in_simulator(dqn, gcn_model, device, train_episodes, train_steps)
+        train_dqn_in_simulator(
+            dqn, gcn_model, device, train_episodes, train_steps,
+            attack_scenarios=ATTACK_SCENARIOS[1:],
+        )
         set_seed(seed)
-        train_ppo_correctly(ppo, gcn_model, device, train_episodes, train_steps)
+        train_ppo_correctly(
+            ppo, gcn_model, device, train_episodes, train_steps,
+            attack_scenarios=ATTACK_SCENARIOS[1:],
+        )
         set_seed(seed)
-        train_attack_graph_q_learning(q_learning, gcn_model, device, train_episodes, train_steps)
+        train_attack_graph_q_learning(
+            q_learning, gcn_model, device, train_episodes, train_steps,
+            attack_scenarios=ATTACK_SCENARIOS[1:],
+        )
 
         torch.save(sac.actor.state_dict(), os.path.join(output_dir, 'policy_checkpoints', f'sac_seed_{seed}.pt'))
         torch.save(dqn.online.state_dict(), os.path.join(output_dir, 'policy_checkpoints', f'dqn_seed_{seed}.pt'))
@@ -581,35 +726,69 @@ def evaluate_defense_models(output_dir, seeds, train_episodes, train_steps, eval
             'Attack Graph + Q-Learning': q_learning,
         }
         for name, policy in policies.items():
-            for episode in range(1, eval_episodes + 1):
-                scenario_seed = seed * 100_000 + episode
-                row, trace = run_defense_episode(
-                    name, policy, gcn_model, device, scenario_seed, eval_steps, episode,
-                    save_trace=(episode == 1),
+            for scenario_index, attack_scenario in enumerate(ATTACK_SCENARIOS[1:]):
+                for episode in range(1, eval_episodes + 1):
+                    scenario_seed = seed * 1_000_000 + scenario_index * 100_000 + episode
+                    row, trace = run_defense_episode(
+                        name, policy, gcn_model, device, scenario_seed, eval_steps,
+                        episode, attack_scenario, save_trace=(episode == 1),
+                    )
+                    row['training_seed'] = int(seed)
+                    row['scenario_seed'] = int(scenario_seed)
+                    episode_rows.append(row)
+                    trace_rows.extend(trace)
+                print(
+                    f'{name}: seed {seed}, {attack_scenario} evaluated on '
+                    f'{eval_episodes} episodes',
+                    flush=True,
                 )
-                row['training_seed'] = int(seed)
-                row['scenario_seed'] = int(scenario_seed)
-                episode_rows.append(row)
-                trace_rows.extend(trace)
-            print(f'{name}: seed {seed} evaluated on {eval_episodes} episodes', flush=True)
 
     episodes = pd.DataFrame(episode_rows)
     episode_log_path = os.path.join(output_dir, 'defense_episodes.csv')
     episodes.to_csv(episode_log_path, index=False)
     episodes = pd.read_csv(episode_log_path)
-    expected_rows = len(SIMULATOR_MODELS) * len(seeds) * eval_episodes
+    expected_rows = len(SIMULATOR_MODELS) * len(seeds) * len(ATTACK_SCENARIOS[1:]) * eval_episodes
     if len(episodes) != expected_rows:
         raise RuntimeError(f'Expected {expected_rows} fresh defense episodes, found {len(episodes)}')
-    scenario_sets = episodes.groupby('model')['scenario_seed'].apply(lambda values: set(values.astype(int)))
-    if any(scenario_sets.iloc[0] != scenario_sets.iloc[index] for index in range(1, len(scenario_sets))):
-        raise RuntimeError('Defense models did not receive the same evaluation scenario seeds')
+    scenario_sets = episodes.groupby(
+        ['attack_scenario', 'model'],
+    )['scenario_seed'].apply(lambda values: set(values.astype(int)))
+    for attack_scenario in ATTACK_SCENARIOS[1:]:
+        scenario_models = scenario_sets.loc[attack_scenario]
+        if any(
+            scenario_models.iloc[0] != scenario_models.iloc[index]
+            for index in range(1, len(scenario_models))
+        ):
+            raise RuntimeError(
+                f'Defense models did not receive the same {attack_scenario} evaluation seeds'
+            )
     pd.DataFrame(trace_rows).to_csv(os.path.join(output_dir, 'defense_traces.csv'), index=False)
     metric_columns = [
         'containment_rate', 'defense_success_rate', 'unnecessary_isolation_rate',
         'successful_compromises', 'final_compromised', 'mean_risk_before',
         'mean_risk_after', 'cumulative_reward', 'mean_action_inference_ms',
     ]
-    summary = episodes.groupby(['model', 'training_seed'], as_index=False)[metric_columns].mean()
+    summary_keys = ['model', 'attack_scenario', 'training_seed']
+    summary = episodes.groupby(summary_keys, as_index=False)[metric_columns].mean()
+    alert_counts = episodes.groupby(summary_keys, as_index=False)[
+        [
+            'policy_alert_true_positive',
+            'policy_alert_false_positive',
+            'policy_alert_true_negative',
+            'policy_alert_false_negative',
+        ]
+    ].sum()
+    alert_counts['policy_alert_accuracy'] = (
+        alert_counts['policy_alert_true_positive'] + alert_counts['policy_alert_true_negative']
+    ) / alert_counts[
+        [
+            'policy_alert_true_positive',
+            'policy_alert_false_positive',
+            'policy_alert_true_negative',
+            'policy_alert_false_negative',
+        ]
+    ].sum(axis=1).clip(lower=1)
+    summary = summary.merge(alert_counts, on=summary_keys, validate='one_to_one')
     summary.to_csv(os.path.join(output_dir, 'defense_comparison.csv'), index=False)
     return episodes, summary
 
@@ -623,16 +802,17 @@ def save_defense_plot(summary, output_dir):
     figure, axes = plt.subplots(1, 3, figsize=(14, 4.8))
     colors = ['#216869', '#49a078', '#f4a261', '#bc4749']
     for axis, (metric, title) in zip(axes, metrics):
-        groups = summary.groupby('model')[metric]
-        names = list(groups.groups)
-        means = [float(groups.get_group(name).mean()) for name in names]
-        deviations = [float(groups.get_group(name).std(ddof=1) or 0.0) for name in names]
-        axis.bar(names, means, yerr=deviations, capsize=3, color=colors[:len(names)])
+        grouped = summary.groupby(['attack_scenario', 'model'])[metric]
+        names = list(grouped.groups)
+        means = [float(grouped.get_group(name).mean()) for name in names]
+        deviations = [float(grouped.get_group(name).std(ddof=1) or 0.0) for name in names]
+        labels = [f'{scenario}\n{model}' for scenario, model in names]
+        axis.bar(labels, means, yerr=deviations, capsize=3, color=colors * len(ATTACK_SCENARIOS[1:]))
         axis.set_title(title)
         axis.set_ylim(0, 1)
         axis.tick_params(axis='x', rotation=35)
         axis.grid(axis='y', alpha=0.25)
-    figure.suptitle('Fresh simulator defense experiments; mean across seeds, error bars = seed SD')
+    figure.suptitle('Fresh synthetic-scenario defense experiments; mean across seeds, error bars = seed SD')
     figure.tight_layout()
     figure.savefig(os.path.join(output_dir, 'defense_performance.png'), dpi=180)
     plt.close(figure)
@@ -651,9 +831,16 @@ def run(args):
     seeds = [int(value) for value in args.seeds.split(',') if value.strip()]
     if len(seeds) < 2:
         raise ValueError('Use at least two seeds for repeated defense experiments')
+    if args.defense_train_episodes < len(ATTACK_SCENARIOS) - 1:
+        raise ValueError(
+            'Defense training needs at least one episode for each of the three attack scenarios'
+        )
+    if args.defense_eval_episodes < 1:
+        raise ValueError('Defense evaluation requires at least one episode per scenario')
 
     (dataset_summary, feature_columns, record_ids, labels, feature_groups,
-     y_by_record, group_by_record, conflicting_groups) = read_chunked_dataset_profile(args.csv)
+     y_by_record, attack_family_codes_by_record, group_by_record,
+     conflicting_groups) = read_chunked_dataset_profile(args.csv)
     dataset_summary['feature_group_label_conflict_groups'] = int(len(conflicting_groups))
     with open(os.path.join(output_dir, 'dataset_summary.json'), 'w', encoding='utf-8') as handle:
         json.dump(dataset_summary, handle, indent=2, default=json_default)
@@ -704,6 +891,20 @@ def run(args):
     }
     with open(os.path.join(output_dir, 'split_config.json'), 'w', encoding='utf-8') as handle:
         json.dump(split_config, handle, indent=2)
+    split_label_distribution = pd.DataFrame(attack_family_distribution_rows(
+        {
+            'train': train_ids,
+            'gcn_train_sample': train_sample_ids,
+            'preprocessing_fit': fit_ids,
+            'validation': validation_ids,
+            'test': test_ids,
+        },
+        attack_family_codes_by_record,
+    ))
+    split_label_distribution.to_csv(
+        os.path.join(output_dir, 'split_label_distribution.csv'),
+        index=False,
+    )
 
     print(f'CSV detector: {len(train_sample_ids):,} train, {len(validation_ids):,} validation, {len(test_ids):,} test; device={device}', flush=True)
     imputer, scaler = fit_preprocessor(args.csv, fit_ids, feature_columns, args.batch_size)
@@ -737,13 +938,25 @@ def run(args):
 
     val_predictions = predict_gcn(
         model, args.csv, validation_ids, feature_columns, y_by_record,
+        attack_family_codes_by_record,
         preprocessor, args.batch_size, device,
     )
     threshold, val_f1 = choose_f1_threshold(
         val_predictions['binary_true'].to_numpy(), val_predictions['gcn_score'].to_numpy()
     )
+    validation_family_metrics = calculate_attack_family_metrics(
+        val_predictions, threshold,
+    )
+    pd.DataFrame([
+        {'attack_family': attack_family, **family_metrics}
+        for attack_family, family_metrics in validation_family_metrics.items()
+    ]).to_csv(
+        os.path.join(output_dir, 'validation_attack_family_detection_metrics.csv'),
+        index=False,
+    )
     test_predictions = predict_gcn(
         model, args.csv, test_ids, feature_columns, y_by_record,
+        attack_family_codes_by_record,
         preprocessor, args.batch_size, device,
     )
     test_predictions['true_label'] = np.where(test_predictions['binary_true'] == 1, 'ATTACK', 'BENIGN')
@@ -756,9 +969,12 @@ def run(args):
     if not np.array_equal(saved_predictions['record_id'].to_numpy(), test_ids):
         raise RuntimeError('Saved predictions do not exactly match the shared held-out record IDs')
     metrics = calculate_detection_metrics(saved_predictions, threshold)
+    attack_family_metrics = calculate_attack_family_metrics(saved_predictions, threshold)
+    metrics['per_attack_family_one_vs_benign'] = attack_family_metrics
     metrics['validation_best_f1'] = float(val_f1)
     metrics['model'] = 'GCN flow detector (GCN architecture; isolated flow nodes)'
     metrics['graph_interpretation'] = 'One CSV flow per node; no edges because the dataset has no host relationship fields.'
+    metrics['detection_task'] = 'Binary BENIGN versus ATTACK; family metrics are one-vs-BENIGN views of this binary detector'
     with open(os.path.join(output_dir, 'detection_metrics.json'), 'w', encoding='utf-8') as handle:
         json.dump(metrics, handle, indent=2, default=json_default)
     with open(os.path.join(output_dir, 'detection_metrics.json'), encoding='utf-8') as handle:
@@ -766,6 +982,10 @@ def run(args):
     for key in ('accuracy', 'precision', 'recall', 'f1', 'false_positive_rate'):
         if not np.isclose(metrics[key], saved_metrics[key], rtol=0.0, atol=0.0):
             raise RuntimeError(f'Saved detection metric {key} does not match saved prediction calculation')
+    pd.DataFrame([
+        {'attack_family': attack_family, **family_metrics}
+        for attack_family, family_metrics in attack_family_metrics.items()
+    ]).to_csv(os.path.join(output_dir, 'attack_family_detection_metrics.csv'), index=False)
     metric_rows = []
     for model_name in DETECTION_MODELS:
         is_gcn_detector = model_name == DETECTION_MODELS[0]
@@ -808,24 +1028,43 @@ def run(args):
         'detection': {
             'model_architecture': 'Existing two-layer GCN with 64 hidden units and sigmoid scalar output',
                         'model_architecture': 'Existing two-layer GCN with 64 hidden units and sigmoid scalar output; newly trained as the GCN detector component of GCN + SAC',
-            'feature_input_dim': len(feature_columns),
-            'threshold': threshold,
-            'training_epochs': args.epochs,
-            'batch_size': args.batch_size,
-            'class_weight_positive': positive_weight,
-            'prediction_metrics_recalculated_from_saved_file': os.path.basename(prediction_path),
-            'other_models': 'N/A for traffic detection: existing implementations emit defense actions only',
+                        'feature_input_dim': len(feature_columns),
+                        'threshold': threshold,
+                        'training_epochs': args.epochs,
+                        'batch_size': args.batch_size,
+                        'class_weight_positive': positive_weight,
+                        'prediction_metrics_recalculated_from_saved_file': os.path.basename(prediction_path),
+                        'attack_family_metrics': 'One-vs-BENIGN metrics for DDoS, PortScan, and Bot using the same binary detector and validation-selected threshold',
+                        'validation_attack_family_metrics_file': 'validation_attack_family_detection_metrics.csv',
+                        'split_attack_family_counts_file': 'split_label_distribution.csv',
+                        'other_models': 'N/A for traffic detection: existing implementations emit defense actions only',
         },
         'defense': {
-            'models': list(SIMULATOR_MODELS),
-            'training': 'all policies trained from scratch for equal episode/step budgets per seed',
-            'seeds': seeds,
-            'train_episodes': args.defense_train_episodes,
-            'train_steps_max': args.defense_train_steps,
-            'evaluation_episodes_per_seed': args.defense_eval_episodes,
-            'evaluation_steps_max': args.defense_eval_steps,
-            'scenario': 'existing fixed 50-node Fat-Tree-like simulator and stochastic generic neighbor propagation',
-            'csv_used_in_simulator': False,
+                        'models': list(SIMULATOR_MODELS),
+                        'training': 'all policies trained from scratch for equal total episode/step budgets per seed, with scenarios assigned round-robin',
+                        'training_scenario_order': list(ATTACK_SCENARIOS[1:]),
+                        'training_episodes_per_scenario': {
+                            scenario: sum(
+                                1 for episode in range(args.defense_train_episodes)
+                                if ATTACK_SCENARIOS[1:][episode % len(ATTACK_SCENARIOS[1:])] == scenario
+                            )
+                            for scenario in ATTACK_SCENARIOS[1:]
+                        },
+                        'attack_scenarios': {
+                            'DDoS': 'synthetic single highest-risk target; threat/traffic indicators are raised and default neighbor propagation probability is 0.75',
+                            'PortScan': 'synthetic probes attempt up to three unisolated, not-yet-flagged nodes per step using existing action-dependent success probabilities, without lateral spread',
+                            'Bot': 'each flagged, non-isolated node attempts propagation to its unflagged neighbors',
+                            'limitation': 'scenario state transitions are simplified simulator assumptions, not packet-level or real-traffic reproductions',
+                        },
+                        'seeds': seeds,
+                        'train_episodes': args.defense_train_episodes,
+                        'train_steps_max': args.defense_train_steps,
+                        'evaluation_episodes_per_seed': args.defense_eval_episodes,
+                        'evaluation_steps_max': args.defense_eval_steps,
+                        'evaluation_scenarios': list(ATTACK_SCENARIOS[1:]),
+                        'policy_alert_accuracy_definition': 'Any non-ALLOW action predicts threat; a node is labeled threat when compromised or input risk >= 0.6. This is not standalone classifier accuracy.',
+                        'scenario_seed_formula': 'training_seed * 1000000 + scenario_index * 100000 + episode_number',
+                        'csv_used_in_simulator': False,
             'response_time_definition': 'policy action-selection wall-clock milliseconds; not real network response latency',
             'trace_limit': 'first evaluation episode per model per seed',
             'fresh_episode_rows': int(len(episodes)),

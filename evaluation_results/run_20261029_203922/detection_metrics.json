@@ -1,0 +1,106 @@
+{
+  "accuracy": 0.8232144888676725,
+  "precision": 0.6987288939480174,
+  "recall": 0.5450786133407622,
+  "f1": 0.6124133748710099,
+  "roc_auc": 0.781351307735835,
+  "false_positive_rate": 0.08096622008679666,
+  "confusion_matrix": {
+    "TN": 306427,
+    "FP": 26996,
+    "FN": 52255,
+    "TP": 62611
+  },
+  "per_class": {
+    "BENIGN": {
+      "precision": 0.8543138490361937,
+      "recall": 0.9190337799132033,
+      "f1-score": 0.8854928081721704,
+      "support": 333423.0
+    },
+    "ATTACK": {
+      "precision": 0.6987288939480174,
+      "recall": 0.5450786133407622,
+      "f1-score": 0.6124133748710099,
+      "support": 114866.0
+    },
+    "accuracy": 0.8232144888676725,
+    "macro avg": {
+      "precision": 0.7765213714921055,
+      "recall": 0.7320561966269827,
+      "f1-score": 0.7489530915215901,
+      "support": 448289.0
+    },
+    "weighted avg": {
+      "precision": 0.8144480003288678,
+      "recall": 0.8232144888676725,
+      "f1-score": 0.8155211109287157,
+      "support": 448289.0
+    }
+  },
+  "test_records": 448289,
+  "threshold": 0.515,
+  "per_attack_family_one_vs_benign": {
+    "DDoS": {
+      "evaluation_scope": "DDoS versus BENIGN; other attack families excluded",
+      "accuracy": 0.8987968387418482,
+      "precision": 0.37525167202795584,
+      "recall": 0.634687646782527,
+      "f1": 0.4716473479835367,
+      "roc_auc": 0.8010225553459516,
+      "false_positive_rate": 0.08096622008679666,
+      "confusion_matrix": {
+        "TN": 306427,
+        "FP": 26996,
+        "FN": 9333,
+        "TP": 16215
+      },
+      "benign_records": 333423,
+      "attack_records": 25548,
+      "test_records": 358971,
+      "threshold": 0.515
+    },
+    "PortScan": {
+      "evaluation_scope": "PortScan versus BENIGN; other attack families excluded",
+      "accuracy": 0.8757094180033307,
+      "precision": 0.3297914597815293,
+      "recall": 0.4195168166745618,
+      "f1": 0.36928209048578775,
+      "roc_auc": 0.8608698160715847,
+      "false_positive_rate": 0.08096622008679666,
+      "confusion_matrix": {
+        "TN": 306427,
+        "FP": 26996,
+        "FN": 18381,
+        "TP": 13284
+      },
+      "benign_records": 333423,
+      "attack_records": 31665,
+      "test_records": 365088,
+      "threshold": 0.515
+    },
+    "Bot": {
+      "evaluation_scope": "Bot versus BENIGN; other attack families excluded",
+      "accuracy": 0.9179463060709728,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "roc_auc": 0.4945690153652465,
+      "false_positive_rate": 0.08096622008679666,
+      "confusion_matrix": {
+        "TN": 306427,
+        "FP": 26996,
+        "FN": 395,
+        "TP": 0
+      },
+      "benign_records": 333423,
+      "attack_records": 395,
+      "test_records": 333818,
+      "threshold": 0.515
+    }
+  },
+  "validation_best_f1": 0.6646723231895376,
+  "model": "GCN flow detector (GCN architecture; isolated flow nodes)",
+  "graph_interpretation": "One CSV flow per node; no edges because the dataset has no host relationship fields.",
+  "detection_task": "Binary BENIGN versus ATTACK; family metrics are one-vs-BENIGN views of this binary detector"
+}
